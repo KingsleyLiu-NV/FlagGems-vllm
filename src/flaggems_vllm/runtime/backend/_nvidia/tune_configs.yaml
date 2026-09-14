@@ -88,7 +88,7 @@ w8a8_block_fp8_bmm_splitk:
 attn_res_post:
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 1
       launch_pdl: false
@@ -96,7 +96,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 1
       launch_pdl: false
@@ -104,7 +104,7 @@ attn_res_post:
     num_stages: 1
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -112,7 +112,7 @@ attn_res_post:
     num_stages: 1
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -120,7 +120,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: false
@@ -128,7 +128,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 8
       launch_pdl: false
@@ -136,7 +136,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -144,7 +144,7 @@ attn_res_post:
     num_stages: 1
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -152,7 +152,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: true
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -160,7 +160,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 2
       launch_pdl: false
@@ -168,7 +168,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: false
@@ -176,7 +176,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: false
@@ -184,7 +184,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: false
@@ -192,7 +192,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: false
-      USE_SOURCE_POINTER_TUPLE: true
+      MERGE_PREFIX_INTO_SOURCE_LOOP: true
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 8
       launch_pdl: false
@@ -200,7 +200,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: true
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: false
@@ -208,7 +208,7 @@ attn_res_post:
     num_stages: 2
   - META:
       USE_COMPACT_SOURCE_REDUCTION: true
-      USE_SOURCE_POINTER_TUPLE: false
+      MERGE_PREFIX_INTO_SOURCE_LOOP: false
       USE_TLE_ASYNC_LOAD: false
       SOURCE_TILE_SIZE: 4
       launch_pdl: true
