@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import math
-import statistics
 
 import pytest
 import torch
@@ -40,64 +39,6 @@ TOKEN_SHAPES = (
     ("c1_prefill", 7680),
     ("c64_prefill", 16384),
 )
-
-
-def _do_bench_cudagraph_pair(
-    baseline_fn,
-    gems_fn,
-    rep_ms: int,
-) -> tuple[float, float]:
-    """Measure two captured graphs with balanced replay ordering."""
-    functions = (baseline_fn, gems_fn)
-    torch.cuda.synchronize()
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        for fn in functions:
-            fn()
-        stream.synchronize()
-
-        estimates = []
-        for fn in functions:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-            for _ in range(5):
-                fn()
-            end_event.record()
-            end_event.synchronize()
-            estimates.append(start_event.elapsed_time(end_event) / 5)
-
-        max_estimate_ms = max(estimates)
-        repeats = (
-            1000 if max_estimate_ms == 0 else max(1, int(rep_ms / max_estimate_ms))
-        )
-        graphs = []
-        for fn in functions:
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                for _ in range(repeats):
-                    fn()
-            graphs.append(graph)
-        stream.synchronize()
-
-        samples = ([], [])
-        for retry in range(10):
-            order = (0, 1) if retry % 2 == 0 else (1, 0)
-            events = {}
-            for provider_idx in order:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
-                graphs[provider_idx].replay()
-                end_event.record()
-                events[provider_idx] = (start_event, end_event)
-            stream.synchronize()
-            for provider_idx, (start_event, end_event) in events.items():
-                samples[provider_idx].append(
-                    start_event.elapsed_time(end_event) / repeats
-                )
-
-    return statistics.median(samples[0]), statistics.median(samples[1])
 
 
 def _cases(
@@ -176,17 +117,6 @@ class AttnResBenchmark(base.Benchmark):
         assert len(self.shapes) == len(TOKEN_SHAPES) * points_per_workload
         self.shape_desc = "case, tokens, num_blocks, write_idx, has_delta, output_norm"
         self._current_case = None
-
-    def get_paired_latency(self, baseline_op, gems_op, *args, **kwargs):
-        if base.Config.mode != base.consts.BenchMode.CUDAGRAPH:
-            return None
-        baseline_fn = lambda: baseline_op(*args, **kwargs)
-        gems_fn = lambda: gems_op(*args, **kwargs)
-        return _do_bench_cudagraph_pair(
-            baseline_fn,
-            gems_fn,
-            base.Config.repetition,
-        )
 
     def get_input_iter(self, dtype):
         torch.manual_seed(2026)

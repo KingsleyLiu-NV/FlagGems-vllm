@@ -134,22 +134,23 @@ def _prune_post_configs(configs, named_args, **kwargs):
             config
             for config in configs
             if not config.kwargs["USE_COMPACT_SOURCE_REDUCTION"]
-            and not config.kwargs["USE_SOURCE_POINTER_TUPLE"]
+            and not config.kwargs["MERGE_PREFIX_INTO_SOURCE_LOOP"]
             and not config.kwargs["USE_TLE_ASYNC_LOAD"]
             and config.kwargs["SOURCE_TILE_SIZE"] == 8
             and config.num_warps == 8
             and config.num_stages == 2
         ]
-    # Two-source tiles have a stable large-token layout: even block counts use
-    # direct block loads and reduce the prefix separately; odd block counts use
-    # the pointer tuple so blocks plus prefix form an even source count.
+    # Two-source tiles have a stable large-token layout: even block counts reduce
+    # the prefix separately; odd block counts merge it into the source loop so
+    # every tile contains two valid sources.
     if token_count_bucket == 2 and num_blocks >= _MIN_BLOCKS_FOR_PERSISTENT_LOOP:
-        use_source_pointer_tuple = num_blocks % 2 == 1
+        merge_prefix_into_source_loop = num_blocks % 2 == 1
         return [
             config
             for config in configs
             if not config.kwargs["USE_COMPACT_SOURCE_REDUCTION"]
-            and config.kwargs["USE_SOURCE_POINTER_TUPLE"] == use_source_pointer_tuple
+            and config.kwargs["MERGE_PREFIX_INTO_SOURCE_LOOP"]
+            == merge_prefix_into_source_loop
             and not config.kwargs["USE_TLE_ASYNC_LOAD"]
             and config.kwargs["SOURCE_TILE_SIZE"] == 2
             and not config.kwargs["launch_pdl"]
@@ -161,7 +162,9 @@ def _prune_post_configs(configs, named_args, **kwargs):
             config
             for config in configs
             if config.kwargs["USE_COMPACT_SOURCE_REDUCTION"]
-            or (config.kwargs["USE_SOURCE_POINTER_TUPLE"] and config.num_stages > 1)
+            or (
+                config.kwargs["MERGE_PREFIX_INTO_SOURCE_LOOP"] and config.num_stages > 1
+            )
         ]
     return configs
 
@@ -258,7 +261,6 @@ def _update_prefix_and_block(
 def _compute_attention_weighted_sum(
     prefix_ptr,
     blocks_ptr,
-    source_ptrs,
     norm_weight_ptr,
     qk_weight_ptr,
     preloaded_prefix,
@@ -271,11 +273,10 @@ def _compute_attention_weighted_sum(
     stride_block_r,
     eps,
     NUM_BLOCKS: tl.constexpr,
-    SOURCE_POINTER_TUPLE_SIZE: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     NEEDS_SOURCE_WRITE_BARRIER: tl.constexpr,
     USE_COMPACT_SOURCE_REDUCTION: tl.constexpr,
-    USE_SOURCE_POINTER_TUPLE: tl.constexpr,
+    MERGE_PREFIX_INTO_SOURCE_LOOP: tl.constexpr,
     USE_PRELOADED_PREFIX: tl.constexpr,
     USE_PRELOADED_NORM_QK_WEIGHT: tl.constexpr,
     USE_TLE_ASYNC_LOAD: tl.constexpr,
@@ -287,7 +288,7 @@ def _compute_attention_weighted_sum(
 
     if USE_PRELOADED_PREFIX:
         prefix = preloaded_prefix
-    elif not USE_COMPACT_SOURCE_REDUCTION and not USE_SOURCE_POINTER_TUPLE:
+    elif not USE_COMPACT_SOURCE_REDUCTION and not MERGE_PREFIX_INTO_SOURCE_LOOP:
         prefix_value_ptrs = prefix_ptr + token_idx * stride_prefix_m + hidden_offsets
         if USE_ALIGNED_MEMORY_HINTS:
             prefix_value_ptrs = tl.multiple_of(prefix_value_ptrs, 16)
@@ -301,7 +302,7 @@ def _compute_attention_weighted_sum(
 
     if USE_PRELOADED_NORM_QK_WEIGHT:
         norm_qk_weight = preloaded_norm_qk_weight
-    elif NUM_BLOCKS > 0 or USE_SOURCE_POINTER_TUPLE:
+    elif NUM_BLOCKS > 0 or MERGE_PREFIX_INTO_SOURCE_LOOP:
         norm_weight_ptrs = norm_weight_ptr + hidden_offsets
         qk_weight_ptrs = qk_weight_ptr + hidden_offsets
         if USE_ALIGNED_MEMORY_HINTS:
@@ -380,10 +381,10 @@ def _compute_attention_weighted_sum(
                 source_weights[:, None] * source_values, axis=0
             )
             running_max = new_running_max
-    elif not USE_SOURCE_POINTER_TUPLE and NUM_BLOCKS == 0:
+    elif not MERGE_PREFIX_INTO_SOURCE_LOOP and NUM_BLOCKS == 0:
         weighted_sum_numerator = prefix
         softmax_denominator = tl.full((), 1.0, tl.float32)
-    elif USE_SOURCE_POINTER_TUPLE:
+    elif MERGE_PREFIX_INTO_SOURCE_LOOP:
         source_count = NUM_BLOCKS + 1
         running_max = tl.full((), -float("inf"), tl.float32)
         softmax_denominator = tl.zeros((), tl.float32)
@@ -394,24 +395,19 @@ def _compute_attention_weighted_sum(
                 0, SOURCE_TILE_SIZE
             )
             valid_sources = source_indices < source_count
-            first_source_stride = stride_prefix_m if NUM_BLOCKS == 0 else stride_block_m
-            source_base_ptrs = (
-                source_ptrs[0] + token_idx * first_source_stride + source_indices * 0
+            block_source_ptrs = (
+                blocks_ptr
+                + token_idx * stride_block_m
+                + source_indices * stride_block_r
             )
-            for source_index in tl.static_range(1, SOURCE_POINTER_TUPLE_SIZE):
-                source_stride = (
-                    stride_prefix_m if source_index == NUM_BLOCKS else stride_block_m
-                )
-                candidate_ptrs = (
-                    source_ptrs[source_index]
-                    + token_idx * source_stride
-                    + source_indices * 0
-                )
-                source_base_ptrs = tl.where(
-                    source_indices == source_index,
-                    candidate_ptrs,
-                    source_base_ptrs,
-                )
+            prefix_source_ptrs = (
+                prefix_ptr + token_idx * stride_prefix_m + source_indices * 0
+            )
+            source_base_ptrs = tl.where(
+                source_indices == NUM_BLOCKS,
+                prefix_source_ptrs,
+                block_source_ptrs,
+            )
             if USE_ALIGNED_MEMORY_HINTS:
                 source_base_ptrs = tl.multiple_of(source_base_ptrs, 16)
             value_ptrs = source_base_ptrs[:, None] + hidden_offsets[None, :]
@@ -640,7 +636,6 @@ def _execute_attn_res_steps(
     weighted_sum_numerator, softmax_denominator = _compute_attention_weighted_sum(
         prefix_ptr,
         blocks_ptr,
-        prefix_ptr,
         norm_weight_ptr,
         qk_weight_ptr,
         updated_prefix,
@@ -653,7 +648,6 @@ def _execute_attn_res_steps(
         stride_block_r,
         eps,
         NUM_BLOCKS,
-        1,
         HIDDEN_SIZE,
         (
             (USE_COMPACT_SOURCE_REDUCTION and ADD_DELTA_TO_PREFIX)
@@ -706,7 +700,6 @@ def _execute_attn_res_steps(
 def _attn_res_post_kernel(
     prefix_ptr,
     blocks_ptr,
-    source_ptrs,
     norm_weight_ptr,
     qk_weight_ptr,
     output_norm_weight_ptr,
@@ -719,11 +712,10 @@ def _attn_res_post_kernel(
     output_norm_eps,
     TOKEN_COUNT_BUCKET: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
-    SOURCE_POINTER_TUPLE_SIZE: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     APPLY_OUTPUT_NORM: tl.constexpr,
     USE_COMPACT_SOURCE_REDUCTION: tl.constexpr,
-    USE_SOURCE_POINTER_TUPLE: tl.constexpr,
+    MERGE_PREFIX_INTO_SOURCE_LOOP: tl.constexpr,
     USE_TLE_ASYNC_LOAD: tl.constexpr,
     USE_ALIGNED_MEMORY_HINTS: tl.constexpr,
     SOURCE_TILE_SIZE: tl.constexpr,
@@ -742,11 +734,9 @@ def _attn_res_post_kernel(
 
     unused_prefix = tl.zeros((HIDDEN_TILE_SIZE,), tl.float32)
     unused_norm_qk_weight = tl.zeros((HIDDEN_TILE_SIZE,), tl.float32)
-
     weighted_sum_numerator, softmax_denominator = _compute_attention_weighted_sum(
         prefix_ptr,
         blocks_ptr,
-        source_ptrs,
         norm_weight_ptr,
         qk_weight_ptr,
         unused_prefix,
@@ -759,11 +749,10 @@ def _attn_res_post_kernel(
         stride_block_r,
         eps,
         NUM_BLOCKS,
-        SOURCE_POINTER_TUPLE_SIZE,
         HIDDEN_SIZE,
         False,
         USE_COMPACT_SOURCE_REDUCTION,
-        USE_SOURCE_POINTER_TUPLE,
+        MERGE_PREFIX_INTO_SOURCE_LOOP,
         False,
         False,
         USE_TLE_ASYNC_LOAD,
@@ -1156,15 +1145,9 @@ def attn_res(
         )
         is_post = delta is None and block_write_idx == -1
         if is_post:
-            source_ptrs = tuple(
-                blocks[:, block_idx, :] for block_idx in range(num_blocks)
-            ) + (prefix,)
-            source_pointer_tuple_size = max(8, triton.next_power_of_2(len(source_ptrs)))
-            source_ptrs += (prefix,) * (source_pointer_tuple_size - len(source_ptrs))
             _attn_res_post_kernel[(num_tokens,)](
                 prefix,
                 blocks,
-                source_ptrs,
                 norm_weight,
                 qk_weight,
                 output_norm_weight_ptr,
@@ -1177,7 +1160,6 @@ def attn_res(
                 output_norm_eps,
                 TOKEN_COUNT_BUCKET=_token_count_bucket(num_tokens),
                 NUM_BLOCKS=num_blocks,
-                SOURCE_POINTER_TUPLE_SIZE=source_pointer_tuple_size,
                 HIDDEN_SIZE=hidden_size,
                 APPLY_OUTPUT_NORM=output_norm_weight is not None,
                 USE_ALIGNED_MEMORY_HINTS=rows_are_16b_aligned,

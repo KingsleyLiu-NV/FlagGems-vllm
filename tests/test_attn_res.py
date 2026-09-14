@@ -393,7 +393,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": False,
-                "USE_SOURCE_POINTER_TUPLE": False,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": False,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 2,
                 "launch_pdl": False,
@@ -403,7 +403,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": False,
-                "USE_SOURCE_POINTER_TUPLE": True,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": True,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 2,
                 "launch_pdl": False,
@@ -413,7 +413,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": False,
-                "USE_SOURCE_POINTER_TUPLE": True,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": True,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 2,
                 "launch_pdl": False,
@@ -423,7 +423,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": False,
-                "USE_SOURCE_POINTER_TUPLE": False,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": False,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 4,
                 "launch_pdl": False,
@@ -434,7 +434,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": False,
-                "USE_SOURCE_POINTER_TUPLE": False,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": False,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 8,
                 "launch_pdl": False,
@@ -445,7 +445,7 @@ def test_attn_res_post_config_pruning(
         triton.Config(
             {
                 "USE_COMPACT_SOURCE_REDUCTION": True,
-                "USE_SOURCE_POINTER_TUPLE": False,
+                "MERGE_PREFIX_INTO_SOURCE_LOOP": False,
                 "USE_TLE_ASYNC_LOAD": False,
                 "SOURCE_TILE_SIZE": 4,
                 "launch_pdl": True,
@@ -463,7 +463,7 @@ def test_attn_res_post_config_pruning(
     actual_strategies = {
         (
             config.kwargs["USE_COMPACT_SOURCE_REDUCTION"],
-            config.kwargs["USE_SOURCE_POINTER_TUPLE"],
+            config.kwargs["MERGE_PREFIX_INTO_SOURCE_LOOP"],
             config.kwargs["SOURCE_TILE_SIZE"],
             config.kwargs["launch_pdl"],
         )
@@ -479,7 +479,7 @@ def test_attn_res_post_tune_config_integration():
     assert configs
     required_meta = {
         "USE_COMPACT_SOURCE_REDUCTION",
-        "USE_SOURCE_POINTER_TUPLE",
+        "MERGE_PREFIX_INTO_SOURCE_LOOP",
         "USE_TLE_ASYNC_LOAD",
         "SOURCE_TILE_SIZE",
         "launch_pdl",
@@ -488,7 +488,7 @@ def test_attn_res_post_tune_config_integration():
     assert any(config.kwargs["USE_TLE_ASYNC_LOAD"] for config in configs)
     assert all(
         not config.kwargs["USE_TLE_ASYNC_LOAD"]
-        or config.kwargs["USE_SOURCE_POINTER_TUPLE"]
+        or config.kwargs["MERGE_PREFIX_INTO_SOURCE_LOOP"]
         for config in configs
     )
 
@@ -507,7 +507,7 @@ def test_attn_res_post_tune_config_integration():
 
 @pytest.mark.attn_res
 @requires_hopper
-def test_attn_res_post_reuses_libentry_cache_for_recreated_source_views():
+def test_attn_res_post_reuses_libentry_cache():
     args = _make_inputs(1, False, True)
     cache = _attn_res_post_kernel.kernel_cache[torch.cuda.current_device()]
 
