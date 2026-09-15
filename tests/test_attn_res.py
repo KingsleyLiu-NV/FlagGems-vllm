@@ -14,10 +14,11 @@
 
 import math
 
-import flaggems_vllm
 import pytest
 import torch
 import triton
+
+import flaggems_vllm
 from flaggems_vllm.ops.attn_res import (
     _HAS_TLE_LOAD,
     _attn_res_post_kernel,
