@@ -14,20 +14,22 @@
 
 from __future__ import annotations
 
-import json
 import os
 import statistics
+from dataclasses import asdict
 
 import pytest
 import torch
 import torch.distributed as dist
+import triton
 
 import flaggems_vllm
 from flaggems_vllm.ops.fused_allreduce_rms_norm import (
     create_fused_allreduce_rms_norm_workspace,
 )
 
-from .conftest import Config
+from . import base, consts
+from .conftest import Config, emit_record_logger, update_result
 
 try:
     import flashinfer.comm as flashinfer_comm
@@ -64,48 +66,6 @@ _VLLM_PDL_ADVANCE_LAUNCH_TOKENS = 16
 # in a shared process.  Keep MNNVL last so both backends can be benchmarked by
 # one torchrun invocation without crossing allocator lifetimes in that order.
 BACKEND_PAIRS = (("peer", "trtllm"), ("mnnvl", "mnnvl"))
-_SUMMARY_ROWS = []
-
-
-def _format_summary(rows) -> str:
-    header = (
-        f"{'vLLM / FlagGems':<19}"
-        f"{'Strategy':<10}"
-        f"{'M':>6}"
-        f"{'ISL/OSL/C':>18}"
-        f"{'vLLM CUDA (us)':>17}"
-        f"{'FlagGems (us)':>17}"
-        f"{'Speedup':>10}"
-    )
-    lines = [
-        "\nFused AllReduce + RMSNorm Performance "
-        f"(TP={rows[0]['tp']}, H={HIDDEN_SIZE}, BF16, CUDA Graph)",
-        header,
-        "-" * len(header),
-    ]
-    for row in rows:
-        workload = row["workload"]
-        workload_label = (
-            f"{workload['isl']}/{workload['osl']}/{workload['concurrency']}"
-        )
-        backend_label = f"{row['vllm_backend']} / {row['flaggems_backend']}"
-        lines.append(
-            f"{backend_label:<19}"
-            f"{row['strategy']:<10}"
-            f"{row['shape'][0]:>6}"
-            f"{workload_label:>18}"
-            f"{row['vllm_median_us']:>17.3f}"
-            f"{row['flaggems_median_us']:>17.3f}"
-            f"{row['speedup']:>9.3f}x"
-        )
-    return "\n".join(lines)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def benchmark_summary():
-    yield
-    if int(os.environ.get("RANK", "0")) == 0 and _SUMMARY_ROWS:
-        print(_format_summary(_SUMMARY_ROWS), flush=True)
 
 
 def _has_distributed_launch() -> bool:
@@ -208,33 +168,28 @@ def _reference(allreduce_input, residual_input, gamma):
     return residual, norm
 
 
-def _capture(call, warmup: int, device: torch.device):
-    call()
-    torch.cuda.synchronize(device)
+def _rank_max_latency_ms(call, device: torch.device) -> float:
     dist.barrier()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        call()
-    torch.cuda.synchronize(device)
-    dist.barrier()
-    for _ in range(warmup):
-        graph.replay()
-    torch.cuda.synchronize(device)
-    dist.barrier()
-    return graph
-
-
-def _rank_max_latency_us(graph, iterations: int, device: torch.device) -> float:
-    dist.barrier()
-    begin = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    begin.record()
-    for _ in range(iterations):
-        graph.replay()
-    end.record()
-    end.synchronize()
+    # A collective graph must contain the same number of calls on every rank.
+    if Config.mode == consts.BenchMode.CUDAGRAPH:
+        latency_ms = base.do_bench_cudagraph(
+            call,
+            return_mode="mean",
+            replay_count=max(1, Config.repetition),
+            warmup_replay_count=max(1, Config.warm_up),
+            rank_barrier=dist.barrier,
+        )
+    elif Config.mode == consts.BenchMode.KERNEL:
+        latency_ms = triton.testing.do_bench(
+            call, warmup=0, rep=0, return_mode="median"
+        )
+    else:
+        raise ValueError(
+            "fused_allreduce_rms_norm benchmark supports "
+            "--mode kernel or --mode cudagraph"
+        )
     latency = torch.tensor(
-        begin.elapsed_time(end) * 1000.0 / iterations,
+        latency_ms,
         dtype=torch.float64,
         device=device,
     )
@@ -297,17 +252,12 @@ def test_fused_allreduce_rms_norm_benchmark(
             weight_bias=0.0,
         )
 
-    warmup = max(1, Config.warm_up)
-    iterations = max(1, Config.repetition)
-    baseline_graph = _capture(call_baseline, warmup, device)
-    triton_graph = _capture(call_triton, warmup, device)
-
     baseline_input.copy_(allreduce_input)
     baseline_residual.copy_(residual_input)
     triton_input.copy_(allreduce_input)
     triton_residual.copy_(residual_input)
-    baseline_graph.replay()
-    triton_graph.replay()
+    call_baseline()
+    call_triton()
     torch.cuda.synchronize(device)
 
     for actual in (baseline_residual, triton_residual):
@@ -317,37 +267,37 @@ def test_fused_allreduce_rms_norm_benchmark(
 
     samples = {"vllm_baseline": [], "flaggems_vllm": []}
     providers = (
-        ("vllm_baseline", baseline_graph),
-        ("flaggems_vllm", triton_graph),
+        ("vllm_baseline", call_baseline),
+        ("flaggems_vllm", call_triton),
     )
     for repeat in range(7):
         order = providers if repeat % 2 == 0 else tuple(reversed(providers))
-        for provider, graph in order:
-            samples[provider].append(_rank_max_latency_us(graph, iterations, device))
+        for provider, call in order:
+            samples[provider].append(_rank_max_latency_ms(call, device))
 
     baseline_median = statistics.median(samples["vllm_baseline"])
     triton_median = statistics.median(samples["flaggems_vllm"])
     if rank == 0:
-        result = {
-            "operator": "fused_allreduce_rms_norm",
-            "case": case_name,
-            "workload": WORKLOADS[case_name],
-            "shape": [m, HIDDEN_SIZE],
-            "dtype": "bfloat16",
-            "tp": world_size,
-            "cuda_graph": True,
-            "vllm_implementation": "FlashInfer CUDA",
-            "vllm_backend": baseline_backend,
-            "flaggems_backend": triton_workspace.backend,
-            "strategy": "oneshot" if use_oneshot else "twoshot",
-            "vllm_trigger_completion_at_end": (baseline_trigger_completion_at_end),
-            "vllm_median_us": baseline_median,
-            "flaggems_median_us": triton_median,
-            "speedup": baseline_median / triton_median,
-            "rank_max_samples_us": samples,
-        }
-        _SUMMARY_ROWS.append(result)
-        print(
-            "RESULT_JSON " + json.dumps(result, sort_keys=True),
-            flush=True,
+        workload = WORKLOADS[case_name]
+        metric = consts.BenchmarkMetrics(
+            shape_detail=(
+                f"shape=({m}, {HIDDEN_SIZE}), TP={world_size}, "
+                f"backend={baseline_backend}/{triton_workspace.backend}, "
+                f"strategy={'oneshot' if use_oneshot else 'twoshot'}, "
+                f"ISL/OSL/C={workload['isl']}/{workload['osl']}/"
+                f"{workload['concurrency']}"
+            ),
+            latency_base=baseline_median,
+            latency=triton_median,
+            speedup=baseline_median / triton_median,
         )
+        result = consts.BenchmarkResult(
+            level=Config.bench_level.value,
+            op_name="fused_allreduce_rms_norm",
+            dtype=str(torch.bfloat16),
+            mode=Config.mode.value,
+            result=[metric],
+        )
+        print(result)
+        update_result(result.op_name, asdict(result))
+        emit_record_logger(result.to_json())
