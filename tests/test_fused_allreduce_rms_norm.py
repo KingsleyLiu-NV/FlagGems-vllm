@@ -62,10 +62,12 @@ PDL_CASES = (
     ),
 )
 NONDEFAULT_ARITHMETIC_CASES = (
-    pytest.param(False, 0.0, id="input-precision-acc"),
-    pytest.param(True, 1.0, id="weight-bias"),
-    pytest.param(False, 1.0, id="input-precision-acc-weight-bias"),
+    (False, 0.0),
+    (True, 1.0),
+    (False, 1.0),
 )
+
+pytestmark = pytest.mark.fused_allreduce_rms_norm
 
 
 if HAS_PDL:
@@ -258,7 +260,7 @@ def _call(
     )
 
 
-def test_vllm_compatible_signature():
+def _check_vllm_compatible_signature():
     parameters = inspect.signature(flaggems_vllm.fused_allreduce_rms_norm).parameters
     assert tuple(parameters) == (
         "allreduce_in",
@@ -281,7 +283,7 @@ def test_vllm_compatible_signature():
     assert defaults[9:] == (None, None, None, None, 0.0)
 
 
-def test_rejects_unvalidated_tp16():
+def _check_rejects_unvalidated_tp16():
     shape = (1, HIDDEN_SIZE)
     allreduce_input = torch.empty(shape, dtype=torch.bfloat16)
     residual = torch.empty_like(allreduce_input)
@@ -325,12 +327,7 @@ def _assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     assert bool(torch.all(adjacent | both_zero).item())
 
 
-@pytest.mark.fused_allreduce_rms_norm
-@pytest.mark.parametrize("m", SHAPES, ids=lambda m: f"m{m}")
-@pytest.mark.parametrize("quantized", QUANTIZATION_CASES)
-@pytest.mark.parametrize("explicit_norm_output", NORM_OUTPUT_CASES)
-@pytest.mark.parametrize("launch_with_pdl", PDL_CASES)
-def test_functional_cartesian_product(
+def _check_functional_case(
     distributed_context,
     workspace,
     m,
@@ -338,7 +335,6 @@ def test_functional_cartesian_product(
     explicit_norm_output,
     launch_with_pdl,
 ):
-    """Cover M x quantization x norm placement x PDL for every workspace."""
     rank, _world_size, device = distributed_context
     tensors = _allocate(m, device, workspace.dtype)
     scale_factor = (
@@ -422,8 +418,7 @@ def test_functional_cartesian_product(
         graph.reset()
 
 
-@pytest.mark.fused_allreduce_rms_norm
-def test_dynamic_shapes_and_varying_cuda_graph_replays(
+def _check_dynamic_shapes_and_varying_cuda_graph_replays(
     distributed_context,
     workspace,
 ):
@@ -460,9 +455,7 @@ def test_dynamic_shapes_and_varying_cuda_graph_replays(
             graph.reset()
 
 
-@pytest.mark.fused_allreduce_rms_norm
-@pytest.mark.skipif(not HAS_PDL, reason="Triton CUDA PDL is unavailable")
-def test_pdl_upstream_and_downstream_chain(distributed_context, workspace):
+def _check_pdl_upstream_and_downstream_chain(distributed_context, workspace):
     rank, _world_size, device = distributed_context
     m = 6
     tensors = _allocate(m, device, workspace.dtype)
@@ -525,10 +518,7 @@ def test_pdl_upstream_and_downstream_chain(distributed_context, workspace):
         graph.reset()
 
 
-@pytest.mark.fused_allreduce_rms_norm
-@pytest.mark.parametrize("m", SHAPES, ids=lambda m: f"m{m}")
-@pytest.mark.parametrize(("fp32_acc", "weight_bias"), NONDEFAULT_ARITHMETIC_CASES)
-def test_nondefault_arithmetic_and_leading_shape(
+def _check_nondefault_arithmetic_case(
     distributed_context,
     workspace,
     m,
@@ -564,8 +554,7 @@ def test_nondefault_arithmetic_and_leading_shape(
     torch.testing.assert_close(tensors["input"], expected_norm, atol=0.04, rtol=0.04)
 
 
-@pytest.mark.fused_allreduce_rms_norm
-def test_nvfp4_capability_gate(distributed_context):
+def _check_nvfp4_capability_gate(distributed_context):
     rank, world_size, device = distributed_context
     if torch.cuda.get_device_capability(device)[0] >= 10:
         pytest.skip("NVFP4 correctness requires the dedicated SM100 test job")
@@ -587,8 +576,7 @@ def test_nvfp4_capability_gate(distributed_context):
         )
 
 
-@pytest.mark.fused_allreduce_rms_norm
-def test_argument_validation(distributed_context):
+def _check_argument_validation(distributed_context):
     _rank, world_size, device = distributed_context
     tensors = _allocate(6, device, torch.bfloat16)
     quant_out = torch.empty_like(tensors["input"], dtype=torch.float8_e4m3fn)
@@ -645,8 +633,7 @@ def test_argument_validation(distributed_context):
         )
 
 
-@pytest.mark.fused_allreduce_rms_norm
-def test_rejects_unsupported_dtype(distributed_context):
+def _check_rejects_unsupported_dtype(distributed_context):
     _rank, world_size, device = distributed_context
     tensors = _allocate(6, device, torch.bfloat16)
     tensors["input"] = torch.empty((6, HIDDEN_SIZE), dtype=torch.float32, device=device)
@@ -662,3 +649,56 @@ def test_rejects_unsupported_dtype(distributed_context):
             max(SHAPES),
             1,
         )
+
+
+@pytest.mark.parametrize("m", SHAPES, ids=lambda m: f"m{m}")
+@pytest.mark.parametrize("quantized", QUANTIZATION_CASES)
+@pytest.mark.parametrize("explicit_norm_output", NORM_OUTPUT_CASES)
+@pytest.mark.parametrize("launch_with_pdl", PDL_CASES)
+def test_fused_allreduce_rms_norm(
+    distributed_context,
+    workspace,
+    m,
+    quantized,
+    explicit_norm_output,
+    launch_with_pdl,
+):
+    _check_functional_case(
+        distributed_context,
+        workspace,
+        m,
+        quantized,
+        explicit_norm_output,
+        launch_with_pdl,
+    )
+
+    primary_case = (
+        m == SHAPES[0]
+        and not quantized
+        and not explicit_norm_output
+        and not launch_with_pdl
+    )
+    if not primary_case:
+        return
+
+    _check_dynamic_shapes_and_varying_cuda_graph_replays(
+        distributed_context,
+        workspace,
+    )
+    if HAS_PDL:
+        _check_pdl_upstream_and_downstream_chain(distributed_context, workspace)
+    for arithmetic_m in SHAPES:
+        for fp32_acc, weight_bias in NONDEFAULT_ARITHMETIC_CASES:
+            _check_nondefault_arithmetic_case(
+                distributed_context,
+                workspace,
+                arithmetic_m,
+                fp32_acc,
+                weight_bias,
+            )
+
+    _check_vllm_compatible_signature()
+    _check_rejects_unvalidated_tp16()
+    _check_nvfp4_capability_gate(distributed_context)
+    _check_argument_validation(distributed_context)
+    _check_rejects_unsupported_dtype(distributed_context)
