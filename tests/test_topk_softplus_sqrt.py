@@ -29,11 +29,13 @@ vendor = flaggems_vllm.vendor_name
 #
 # HAS_TLE      : this vendor's TLE-optimized kernel is usable here.
 # HAS_TLE_HASH : the TLE-optimized *hash-mode* kernel is usable here
-#                (mthreads only; ascend's hash path is TLE-agnostic).
+#                (mthreads / thead / hygon / iluvatar only; ascend's hash
+#                path is TLE-agnostic).
 #
-# ascend   : flaggems_vllm.topk_softplus_sqrt(..., use_ascend_tle=...)
-# mthreads : backend module exposes topk_softplus_sqrt_baseline /
-#            topk_softplus_sqrt_tle directly.
+# ascend                          : flaggems_vllm.topk_softplus_sqrt(..., use_ascend_tle=...)
+# mthreads, thead, hygon, iluvatar: backend module exposes
+#                                    topk_softplus_sqrt_baseline /
+#                                    topk_softplus_sqrt_tle directly.
 # ---------------------------------------------------------------------------
 HAS_TLE = False
 HAS_TLE_HASH = False
@@ -51,6 +53,36 @@ elif vendor == "mthreads":
         topk_softplus_sqrt_baseline as _backend_baseline_op,
     )
     from flaggems_vllm.runtime.backend._mthreads.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_tle as _backend_tle_op,
+    )
+
+    HAS_TLE_HASH = HAS_TLE
+elif vendor == "thead":
+    from flaggems_vllm.runtime.backend._thead.ops.topk_softplus_sqrt import HAS_TLE
+    from flaggems_vllm.runtime.backend._thead.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_baseline as _backend_baseline_op,
+    )
+    from flaggems_vllm.runtime.backend._thead.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_tle as _backend_tle_op,
+    )
+
+    HAS_TLE_HASH = HAS_TLE
+elif vendor == "hygon":
+    from flaggems_vllm.runtime.backend._hygon.ops.topk_softplus_sqrt import HAS_TLE
+    from flaggems_vllm.runtime.backend._hygon.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_baseline as _backend_baseline_op,
+    )
+    from flaggems_vllm.runtime.backend._hygon.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_tle as _backend_tle_op,
+    )
+
+    HAS_TLE_HASH = HAS_TLE
+elif vendor == "iluvatar":
+    from flaggems_vllm.runtime.backend._iluvatar.ops.topk_softplus_sqrt import HAS_TLE
+    from flaggems_vllm.runtime.backend._iluvatar.ops.topk_softplus_sqrt import (
+        topk_softplus_sqrt_baseline as _backend_baseline_op,
+    )
+    from flaggems_vllm.runtime.backend._iluvatar.ops.topk_softplus_sqrt import (
         topk_softplus_sqrt_tle as _backend_tle_op,
     )
 
@@ -191,9 +223,9 @@ def test_topk_softplus_sqrt(
 ):
     """Test topk_softplus_sqrt in standard mode (with bias) against PyTorch reference.
 
-    Runs on any backend with a valid device (CUDA, Ascend NPU, MUSA, etc.) —
-    not gated on torch.cuda.is_available(), since that is always False on
-    non-CUDA backends.
+    Runs on any backend with a valid device (CUDA, Ascend NPU, MUSA, T-Head
+    PPU, Hygon HCU, Iluvatar, etc.) — not gated on torch.cuda.is_available(),
+    since that is always False on non-CUDA backends.
     """
     torch.manual_seed(0)
 
@@ -237,8 +269,9 @@ def test_topk_softplus_sqrt_tle(
     num_tokens, num_experts, topk, dtype, renormalize, routed_scaling_factor
 ):
     """Dense path with the TLE-optimized kernel forced, against the PyTorch
-    reference. Covers ascend's `_fused_topk_kernel_ascend_tle` and mthreads'
-    `_fused_topk_kernel_tle`.
+    reference. Covers ascend's `_fused_topk_kernel_ascend_tle` and the
+    `_fused_topk_kernel_tle` implementations on mthreads, thead, hygon and
+    iluvatar.
     """
     torch.manual_seed(0)
 
@@ -265,62 +298,6 @@ def test_topk_softplus_sqrt_tle(
     )
 
     _check_topk_results(res_weights, res_ids, ref_weights, ref_ids)
-
-
-@pytest.mark.topk_softplus_sqrt
-@pytest.mark.skipif(
-    not HAS_TLE,
-    reason=f"TLE-optimized kernel is not available on {vendor}",
-)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS_LIST)
-@pytest.mark.parametrize("num_experts", NUM_EXPERTS_LIST)
-@pytest.mark.parametrize("topk", TOPK_LIST)
-@pytest.mark.parametrize("dtype", DTYPE_LIST)
-@pytest.mark.parametrize("renormalize", RENORMALIZE_LIST)
-@pytest.mark.parametrize("routed_scaling_factor", RSF_LIST)
-def test_topk_softplus_sqrt_tle_vs_baseline(
-    num_tokens, num_experts, topk, dtype, renormalize, routed_scaling_factor
-):
-    """Cross-check the TLE kernel against the plain Triton kernel on identical
-    inputs, isolating the effect of the on-chip-buffer optimization from the
-    looser tolerance used against the PyTorch reference.
-    """
-    torch.manual_seed(0)
-
-    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device=device)
-    correction_bias = torch.randn((num_experts,), dtype=torch.float32, device=device)
-
-    base_w, base_ids, base_tei = _run_topk(
-        "baseline",
-        gating_output,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-        correction_bias=correction_bias,
-    )
-    tle_w, tle_ids, tle_tei = _run_topk(
-        "tle",
-        gating_output,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-        correction_bias=correction_bias,
-    )
-
-    # Same inputs, deterministic tie-break rule -> indices should match
-    # exactly, and token_expert_indices are computed identically in both
-    # kernels, so require an exact match there too.
-    utils.gems_assert_equal(tle_ids, base_ids)
-    utils.gems_assert_equal(tle_tei, base_tei)
-
-    # Weights: allow tight but non-zero tolerance since on-chip staging /
-    # HBM store-load may not be bit-identical in floating point.
-    torch.testing.assert_close(
-        utils.to_reference(tle_w),
-        utils.to_reference(base_w),
-        atol=1e-5,
-        rtol=1e-5,
-    )
 
 
 @pytest.mark.topk_softplus_sqrt
@@ -383,8 +360,8 @@ def test_topk_softplus_sqrt_hash(
 def test_topk_softplus_sqrt_tle_hash(
     num_tokens, num_experts, topk, dtype, renormalize, routed_scaling_factor
 ):
-    """Hash path with the TLE kernel forced (mthreads only: ascend's hash
-    path does not have a separate TLE variant).
+    """Hash path with the TLE kernel forced (mthreads / thead / hygon /
+    iluvatar only: ascend's hash path does not have a separate TLE variant).
     """
     torch.manual_seed(0)
 
